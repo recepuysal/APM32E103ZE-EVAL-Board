@@ -130,12 +130,13 @@ zaten test edilmiş. Sıfırdan saat konfigürasyonu yazılmadı.
       - Henüz gerçek zamanlı saat (RTC) bağlanmadığı için dosya zaman damgaları
         sabit (`FF_FS_NORTC=1`) — kartta RTC yedek pil yuvası (CR1220) var,
         ileride bağlanabilir.
-      - **Donanımda henüz test edilmedi.**
+      - **Donanımda test edildi (2026-09-01), çalışıyor:** kart tespit edildi,
+        `f_mount` başarılı, seri log ile SD karttaki `LOG.TXT`'e yazılan kayıt
+        sayısı ve menüdeki "SD Kart" sayfasındaki canlı sayaç birebir eşleşti
+        (7 kayıt).
 
 ## Yapılacak / Bilinmeyenler
 
-- [ ] microSD loglama donanımda test bekliyor (kart tespiti, mount, LOG.TXT
-      yazımı, biçimlendirme onay akışı).
 - [ ] RTC (CR1220 yedek pilli) henüz bağlanmadı — SD dosya zaman damgaları
       şu an sabit.
 - [ ] CAN1/CAN2 (TJA1050 transceiver'lar) henüz kullanılmadı.
