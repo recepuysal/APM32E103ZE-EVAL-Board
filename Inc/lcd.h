@@ -28,6 +28,11 @@
 #define LCD_WIDTH   240U
 #define LCD_HEIGHT  280U
 
+/* Same physical glass, rotated 90 deg via MADCTL's MV bit - see
+ * LCD_SetOrientation() in lcd.c. */
+#define LCD_LANDSCAPE_WIDTH  280U
+#define LCD_LANDSCAPE_HEIGHT 240U
+
 #define RGB2RGB565(R, G, B) ((((R) & 0xF8) << 8) | (((G) & 0xFC) << 3) | (((B) & 0xF8) >> 3))
 
 #define LCD_COLOR_BLACK   RGB2RGB565(0, 0, 0)
@@ -39,6 +44,7 @@
 #define LCD_COLOR_CYAN    RGB2RGB565(0, 255, 255)
 
 void LCD_Init(void);
+void LCD_SetOrientation(uint8_t landscape); /* 0 = portrait (default/menu), 1 = landscape (video) */
 void LCD_Clear(uint16_t xStart, uint16_t yStart, uint16_t xEnd, uint16_t yEnd, uint16_t color);
 void LCD_DrawPoint(uint16_t x, uint16_t y, uint16_t color);
 void LCD_DrawLine(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t color);
@@ -46,5 +52,11 @@ void LCD_DrawCircle(uint16_t x0, uint16_t y0, uint8_t radius, uint16_t color);
 void LCD_DisplayString(uint16_t x, uint16_t y, const char *p, uint16_t fc, uint16_t bc, uint8_t fontSize);
 void LCD_DisplayIntNum(uint16_t x, uint16_t y, uint16_t num, uint8_t len, uint16_t fc, uint16_t bc, uint8_t fontSize);
 void LCD_DisplayFloatNum(uint16_t x, uint16_t y, float num, uint8_t len, uint16_t fc, uint16_t bc, uint8_t fontSize);
+
+/* Bulk pixel streaming (one CS assertion for the whole burst, instead of
+ * one per byte) - for animation/video frames, not general drawing. */
+void LCD_BlitBegin(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2);
+void LCD_BlitPixels(const uint16_t *pixels, uint32_t count);
+void LCD_BlitEnd(void);
 
 #endif

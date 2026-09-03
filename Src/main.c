@@ -6,7 +6,8 @@
  *          2026-09-01) + ST7789 SPI LCD KEY1/KEY2/KEY3 menu demo (see
  *          lcd.c/lcd.h and menu.c/menu.h) + USART1 status log (serial.c/serial.h)
  *          + potentiometer-controlled LCD backlight (backlight.c/backlight.h)
- *          + microSD status logging to LOG.TXT (sdcard.c/sdlog.c, FatFs).
+ *          + microSD status logging to LOG.TXT (sdcard.c/sdlog.c, FatFs)
+ *          + SPI NOR flash test page (spiflash.c).
  *
  * Board pin roles (LED1/LED2/LED3, KEY1/KEY2/KEY3) confirmed from Geehy's
  * own Board_APM32E103_EVAL.h (GeehySemi/APM32E10x_EVAL_SDK repo, official
@@ -28,6 +29,7 @@
 #include "serial.h"
 #include "backlight.h"
 #include "sdlog.h"
+#include "spiflash.h"
 #include <stdio.h>
 
 #define LED_PORT   GPIOD
@@ -36,7 +38,7 @@
 #define LED3_PIN   GPIO_PIN_15
 #define LED_ALL_PINS (LED1_PIN | LED2_PIN | LED3_PIN)
 
-#define BLINK_PERIOD_MS  2000U
+#define BLINK_PERIOD_MS  500U
 #define LOG_PERIOD_MS    500U
 #define SDLOG_PERIOD_MS  5000U /* much slower than the serial log - avoids hammering the card with writes */
 
@@ -55,6 +57,7 @@ int main(void)
 	Backlight_Init();
 	Serial_Init();
 	SdLog_Init();
+	SPIFlash_Init();
 	LCD_Init();
 	Menu_Init();
 

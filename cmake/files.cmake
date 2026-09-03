@@ -20,6 +20,9 @@ target_sources(${PROJECT_NAME} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/Src/backlight.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/Src/sdcard.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/Src/sdlog.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/spiflash.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/video.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/Src/main.c"
     "${CMAKE_CURRENT_SOURCE_DIR}/Src/startup_apm32e10x_hd.S"
 )

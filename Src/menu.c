@@ -12,6 +12,10 @@
  * Debounced with a non-blocking tick-based edge detector (same pattern as
  * UniBoard's power-button handling), not the SDK's TMR7-ISR + blocking-delay
  * approach.
+ *
+ * Visual style: flat accent-color title/footer bars, full-width selection
+ * rows (no numbering - the highlighted bar is the only affordance needed),
+ * one accent color for "good"/neutral values and red reserved for failures.
  ******************************************************************************
  */
 
@@ -19,6 +23,9 @@
 #include "lcd.h"
 #include "temp.h"
 #include "sdlog.h"
+#include "spiflash.h"
+#include "demo.h"
+#include "video.h"
 #include "apm32e10x_gpio.h"
 #include "apm32e10x_rcm.h"
 #include <stdio.h>
@@ -38,20 +45,22 @@
 
 #define KEY_DEBOUNCE_MS 30U
 
-#define MENU_FCOLOR     RGB2RGB565(0, 222, 152)
-#define MENU_BCOLOR     LCD_COLOR_WHITE
-#define MENU_SEL_FCOLOR LCD_COLOR_WHITE
-#define MENU_SEL_BCOLOR MENU_FCOLOR
+/* Palette: one accent color carries both branding and "good/neutral" state;
+ * red is reserved for failures only, so it always means something. */
+#define COLOR_ACCENT RGB2RGB565(0, 150, 136)
+#define COLOR_TEXT   RGB2RGB565(33, 33, 33)
+#define COLOR_MUTED  RGB2RGB565(150, 150, 150)
+#define COLOR_BG     LCD_COLOR_WHITE
+#define COLOR_WHITE  LCD_COLOR_WHITE
+#define COLOR_FAIL   LCD_COLOR_RED
 
-#define LINE_TITLE 8
-#define LINE_0     44
-#define LINE_1     70
-#define LINE_2     96
-#define LINE_3     122
-#define LINE_SEP   148
-#define LINE_HINT  168
-#define LINE_CONTENT 90
-#define BOTTOM_TOP 256
+#define TITLE_HEIGHT 38U
+#define ROW_Y_BASE   40U
+#define ROW_HEIGHT   26U
+#define ROW_STEP     30U
+#define ROW_MARGIN   12U
+#define FOOTER_TOP   250U
+#define LINE_CONTENT 54U
 
 extern volatile uint32_t g_tickMs;
 
@@ -68,8 +77,18 @@ static Key_T s_key1 = { KEY1_PORT, KEY1_PIN, 1U, 0U, 0U };
 static Key_T s_key2 = { KEY2_PORT, KEY2_PIN, 1U, 0U, 0U };
 static Key_T s_key3 = { KEY3_PORT, KEY3_PIN, 0U, 0U, 0U };
 
-static const char *s_itemTitle[4] = { "LED Durumu", "Sayac (ms)", "Kart Bilgisi", "SD Kart" };
-#define MENU_ITEM_COUNT 4U
+static const char *s_itemTitle[7] = { "LED Durumu", "Sayac", "Kart Bilgisi", "SD Kart", "SPI Flash", "Demo", "Video" };
+#define MENU_ITEM_COUNT 7U
+
+typedef enum
+{
+	TEST_NONE,
+	TEST_PASS,
+	TEST_FAIL,
+} TestResult_T;
+
+static TestResult_T s_flashResult = TEST_NONE;
+static uint32_t s_flashId = 0U;
 
 typedef enum
 {
@@ -88,6 +107,8 @@ static void DrawItem(uint8_t index, uint8_t selected);
 static void DrawSub(uint8_t index);
 static void UpdateSubContent(uint8_t index);
 static void DrawCenteredString(uint16_t y, const char *s, uint16_t fc, uint16_t bc, uint8_t fontSize);
+static void DrawResult(uint16_t y, TestResult_T result);
+static void RunFlashTest(void);
 
 void Menu_Init(void)
 {
@@ -120,18 +141,46 @@ void Menu_Poll(void)
 	{
 		if (k3)
 		{
+			if (s_selected == 6U)
+			{
+				Video_Stop();
+			}
+
 			s_state = MENU_STATE_HOME;
 			DrawHome();
 		}
+		else if (s_selected == 5U)
+		{
+			Demo_Step(); /* free-running animation - not gated by K2 or the content refresh throttle */
+		}
+		else if (s_selected == 6U)
+		{
+			if (k2)
+			{
+				Video_TogglePause();
+			}
+
+			Video_Step(); /* no-ops internally while paused */
+		}
 		else
 		{
-			if ((s_selected == 3U) && k2 && (SdLog_GetState() == SDLOG_NO_FILESYSTEM))
+			if (k2)
 			{
-				s_formatArmCount++;
-				if (s_formatArmCount >= 2U)
+				if (s_selected == 3U)
 				{
-					SdLog_TryFormat();
-					s_formatArmCount = 0U;
+					if (SdLog_GetState() == SDLOG_NO_FILESYSTEM)
+					{
+						s_formatArmCount++;
+						if (s_formatArmCount >= 2U)
+						{
+							SdLog_TryFormat();
+							s_formatArmCount = 0U;
+						}
+					}
+				}
+				else if (s_selected == 4U)
+				{
+					RunFlashTest();
 				}
 			}
 
@@ -177,17 +226,6 @@ static uint8_t KeyPressedEdge(Key_T *key)
 	return 0U;
 }
 
-static void DrawItem(uint8_t index, uint8_t selected)
-{
-	uint16_t y = (index == 0U) ? LINE_0 : ((index == 1U) ? LINE_1 : ((index == 2U) ? LINE_2 : LINE_3));
-	char buf[20];
-
-	/* Fixed text per index (never changes) - safe to redraw without a
-	 * pre-clear, the new glyphs fully cover the old ones at the same cells. */
-	snprintf(buf, sizeof(buf), "%u.%s", (unsigned)(index + 1U), s_itemTitle[index]);
-	LCD_DisplayString(10, y, buf, selected ? MENU_SEL_FCOLOR : MENU_FCOLOR, selected ? MENU_SEL_BCOLOR : MENU_BCOLOR, 24);
-}
-
 /* Centers a string horizontally within LCD_WIDTH (clamped to x=0 if wider
  * than the screen). */
 static void DrawCenteredString(uint16_t y, const char *s, uint16_t fc, uint16_t bc, uint8_t fontSize)
@@ -198,48 +236,121 @@ static void DrawCenteredString(uint16_t y, const char *s, uint16_t fc, uint16_t 
 	LCD_DisplayString(x, y, s, fc, bc, fontSize);
 }
 
+/* A full-width rounded-feel row: selection is a solid accent bar, not just
+ * recolored text, so the current item reads clearly at a glance. */
+static void DrawItem(uint8_t index, uint8_t selected)
+{
+	uint16_t top = (uint16_t)(ROW_Y_BASE + index * ROW_STEP);
+	uint16_t bg = selected ? COLOR_ACCENT : COLOR_BG;
+	uint16_t fg = selected ? COLOR_WHITE : COLOR_TEXT;
+
+	LCD_Clear(ROW_MARGIN, top, LCD_WIDTH - ROW_MARGIN, (uint16_t)(top + ROW_HEIGHT), bg);
+	LCD_DisplayString(ROW_MARGIN + 12U, (uint16_t)(top + 1U), s_itemTitle[index], fg, bg, 24);
+}
+
 static void DrawHome(void)
 {
-	LCD_Clear(0, 0, LCD_WIDTH, LCD_HEIGHT, MENU_BCOLOR);
+	LCD_Clear(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BG);
 
-	LCD_Clear(0, 0, LCD_WIDTH, 36, MENU_FCOLOR);
-	DrawCenteredString(LINE_TITLE, "APM32E103ZE MENU", MENU_SEL_FCOLOR, MENU_FCOLOR, 16);
+	LCD_Clear(0, 0, LCD_WIDTH, TITLE_HEIGHT, COLOR_ACCENT);
+	DrawCenteredString(11, "APM32E103ZE", COLOR_WHITE, COLOR_ACCENT, 16);
 
 	for (uint8_t i = 0; i < MENU_ITEM_COUNT; i++)
 	{
 		DrawItem(i, i == s_selected);
 	}
 
-	LCD_DrawLine(10, LINE_SEP, LCD_WIDTH - 10, LINE_SEP, MENU_FCOLOR);
-	LCD_DisplayString(10, LINE_HINT, "K1:Sec K2:Gir K3:Geri", LCD_COLOR_BLACK, MENU_BCOLOR, 16);
-
-	LCD_Clear(0, BOTTOM_TOP, LCD_WIDTH, LCD_HEIGHT, MENU_FCOLOR);
-	LCD_DisplayString(45, BOTTOM_TOP + 6, "APM32 EVAL BOARD", MENU_SEL_FCOLOR, MENU_FCOLOR, 16);
+	LCD_Clear(0, FOOTER_TOP, LCD_WIDTH, LCD_HEIGHT, COLOR_ACCENT);
+	DrawCenteredString(FOOTER_TOP + 7U, "Sec / Ac / Geri", COLOR_WHITE, COLOR_ACCENT, 16);
 }
 
 static void DrawSub(uint8_t index)
 {
-	LCD_Clear(0, 0, LCD_WIDTH, LCD_HEIGHT, MENU_BCOLOR);
+	LCD_Clear(0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BG);
 
-	LCD_Clear(0, 0, LCD_WIDTH, 36, MENU_FCOLOR);
-	DrawCenteredString(LINE_TITLE, s_itemTitle[index], MENU_SEL_FCOLOR, MENU_FCOLOR, 16);
+	LCD_Clear(0, 0, LCD_WIDTH, TITLE_HEIGHT, COLOR_ACCENT);
+	DrawCenteredString(11, s_itemTitle[index], COLOR_WHITE, COLOR_ACCENT, 16);
 
 	if (index == 2U)
 	{
-		LCD_DisplayString(10, LINE_CONTENT, "APM32E103ZE", MENU_FCOLOR, MENU_BCOLOR, 24);
-		LCD_DisplayString(10, LINE_CONTENT + 30, "Cortex-M3 @72MHz", MENU_FCOLOR, MENU_BCOLOR, 16);
-		LCD_DisplayString(10, LINE_CONTENT + 50, "Flash 512K RAM 128K", MENU_FCOLOR, MENU_BCOLOR, 16);
-		LCD_DisplayString(10, LINE_CONTENT + 80, "Sicaklik:", MENU_FCOLOR, MENU_BCOLOR, 24);
+		LCD_DisplayString(20, LINE_CONTENT, "APM32E103ZE", COLOR_TEXT, COLOR_BG, 24);
+		LCD_DisplayString(20, LINE_CONTENT + 26U, "Cortex-M3 @72MHz", COLOR_MUTED, COLOR_BG, 16);
+		LCD_DisplayString(20, LINE_CONTENT + 44U, "Flash 512K  RAM 128K", COLOR_MUTED, COLOR_BG, 16);
+		LCD_DisplayString(20, LINE_CONTENT + 74U, "Sicaklik", COLOR_TEXT, COLOR_BG, 24);
 	}
 	else if (index == 3U)
 	{
 		s_formatArmCount = 0U;
 	}
+	else if (index == 4U)
+	{
+		s_flashResult = TEST_NONE;
+		s_flashId = 0U;
+		LCD_DisplayString(20, LINE_CONTENT, "K2 ile testi baslat", COLOR_MUTED, COLOR_BG, 16);
+	}
 
-	LCD_Clear(0, BOTTOM_TOP, LCD_WIDTH, LCD_HEIGHT, MENU_FCOLOR);
-	LCD_DisplayString(35, BOTTOM_TOP + 6, "K3: Geri Don", MENU_SEL_FCOLOR, MENU_FCOLOR, 16);
+	LCD_Clear(0, FOOTER_TOP, LCD_WIDTH, LCD_HEIGHT, COLOR_ACCENT);
+	DrawCenteredString(FOOTER_TOP + 7U, "Geri", COLOR_WHITE, COLOR_ACCENT, 16);
 
-	UpdateSubContent(index);
+	if (index == 5U)
+	{
+		Demo_Start(); /* draws its own first frame over the content area */
+	}
+	else if (index == 6U)
+	{
+		Video_Start();
+	}
+	else
+	{
+		UpdateSubContent(index);
+	}
+}
+
+static void DrawResult(uint16_t y, TestResult_T result)
+{
+	const char *text;
+	uint16_t color;
+
+	switch (result)
+	{
+	case TEST_PASS: text = "Basarili   "; color = COLOR_ACCENT; break;
+	case TEST_FAIL: text = "Basarisiz  "; color = COLOR_FAIL;   break;
+	default:        text = "-          "; color = COLOR_MUTED;  break;
+	}
+
+	LCD_DisplayString(20, y, text, color, COLOR_BG, 16);
+}
+
+static void RunFlashTest(void)
+{
+	uint8_t wbuf[16];
+	uint8_t rbuf[16];
+	uint8_t ok;
+
+	for (uint8_t i = 0; i < sizeof(wbuf); i++)
+	{
+		wbuf[i] = (uint8_t)(i ^ 0xA5U);
+	}
+
+	s_flashId = SPIFlash_ReadJedecID();
+	ok = (s_flashId == W25Q16_JEDEC_ID) ? 1U : 0U;
+
+	if (ok)
+	{
+		SPIFlash_EraseSector(0x000000U);
+		SPIFlash_WriteBuffer(wbuf, 0x000000U, sizeof(wbuf));
+		SPIFlash_ReadBuffer(rbuf, 0x000000U, sizeof(rbuf));
+
+		for (uint8_t i = 0; i < sizeof(wbuf); i++)
+		{
+			if (rbuf[i] != wbuf[i])
+			{
+				ok = 0U;
+			}
+		}
+	}
+
+	s_flashResult = ok ? TEST_PASS : TEST_FAIL;
 }
 
 static void UpdateSubContent(uint8_t index)
@@ -255,22 +366,25 @@ static void UpdateSubContent(uint8_t index)
 	if (index == 0U)
 	{
 		/* GPIO pin HIGH -> LED physically off (active-low drive), confirmed
-		 * against real hardware - so the text is the inverse of the bit. */
+		 * against real hardware. */
 		uint16_t out = GPIO_ReadOutputPort(LED_PORT);
+		static const char *names[3] = { "LED1", "LED2", "LED3" };
+		uint16_t pins[3] = { LED1_PIN, LED2_PIN, LED3_PIN };
 
-		LCD_DisplayString(10, LINE_CONTENT, "LED1:", MENU_FCOLOR, MENU_BCOLOR, 24);
-		LCD_DisplayString(110, LINE_CONTENT, (out & LED1_PIN) ? "OFF" : "ON ", LCD_COLOR_RED, MENU_BCOLOR, 24);
+		for (uint8_t i = 0; i < 3U; i++)
+		{
+			uint16_t y = (uint16_t)(LINE_CONTENT + i * 34U);
+			uint8_t on = (out & pins[i]) ? 0U : 1U;
 
-		LCD_DisplayString(10, LINE_CONTENT + 30, "LED2:", MENU_FCOLOR, MENU_BCOLOR, 24);
-		LCD_DisplayString(110, LINE_CONTENT + 30, (out & LED2_PIN) ? "OFF" : "ON ", LCD_COLOR_RED, MENU_BCOLOR, 24);
-
-		LCD_DisplayString(10, LINE_CONTENT + 60, "LED3:", MENU_FCOLOR, MENU_BCOLOR, 24);
-		LCD_DisplayString(110, LINE_CONTENT + 60, (out & LED3_PIN) ? "OFF" : "ON ", LCD_COLOR_RED, MENU_BCOLOR, 24);
+			LCD_DisplayString(20, y, names[i], COLOR_TEXT, COLOR_BG, 24);
+			LCD_DisplayString(130, y, on ? "Acik " : "Kapali", on ? COLOR_ACCENT : COLOR_MUTED, COLOR_BG, 24);
+		}
 	}
 	else if (index == 1U)
 	{
-		LCD_DisplayString(10, LINE_CONTENT, "Tick:", MENU_FCOLOR, MENU_BCOLOR, 24);
-		LCD_DisplayIntNum(110, LINE_CONTENT, (uint16_t)(g_tickMs % 60000U), 5, LCD_COLOR_RED, MENU_BCOLOR, 24);
+		LCD_DisplayString(20, LINE_CONTENT, "Gecen sure", COLOR_TEXT, COLOR_BG, 16);
+		LCD_DisplayIntNum(20, LINE_CONTENT + 24U, (uint16_t)(g_tickMs % 60000U), 5, COLOR_ACCENT, COLOR_BG, 24);
+		LCD_DisplayString(140, LINE_CONTENT + 24U, "ms", COLOR_MUTED, COLOR_BG, 24);
 	}
 	else if (index == 2U)
 	{
@@ -284,47 +398,61 @@ static void UpdateSubContent(uint8_t index)
 			frac = -frac;
 		}
 
-		snprintf(buf, sizeof(buf), "%d.%dC  ", whole, frac);
-		LCD_DisplayString(130, LINE_CONTENT + 80, buf, LCD_COLOR_RED, MENU_BCOLOR, 24);
+		snprintf(buf, sizeof(buf), "%d.%dC ", whole, frac);
+		LCD_DisplayString(138, LINE_CONTENT + 74U, buf, COLOR_ACCENT, COLOR_BG, 24);
 	}
 	else if (index == 3U)
 	{
 		static SdLog_State_T lastDrawnState = (SdLog_State_T)0xFFU;
 		SdLog_State_T state = SdLog_GetState();
 		const char *stateText;
+		uint16_t stateColor;
 		char buf[24];
 
 		if (state != lastDrawnState)
 		{
 			lastDrawnState = state;
-			LCD_Clear(10, LINE_CONTENT + 24, LCD_WIDTH - 10, BOTTOM_TOP, MENU_BCOLOR);
+			LCD_Clear(20, LINE_CONTENT + 24U, LCD_WIDTH - 20, FOOTER_TOP, COLOR_BG);
 		}
 
 		switch (state)
 		{
-		case SDLOG_NO_CARD:        stateText = "Kart yok       "; break;
-		case SDLOG_INIT_FAIL:      stateText = "Baslatma hatasi"; break;
-		case SDLOG_NO_FILESYSTEM:  stateText = "Bicimsiz kart  "; break;
-		case SDLOG_MOUNT_FAIL:     stateText = "Baglama hatasi "; break;
-		case SDLOG_MOUNTED:        stateText = "Hazir - LOG.TXT"; break;
-		default:                   stateText = "?              "; break;
+		case SDLOG_NO_CARD:       stateText = "Kart yok       "; stateColor = COLOR_MUTED; break;
+		case SDLOG_INIT_FAIL:     stateText = "Baslatma hatasi"; stateColor = COLOR_FAIL;  break;
+		case SDLOG_NO_FILESYSTEM: stateText = "Bicimsiz kart  "; stateColor = COLOR_FAIL;  break;
+		case SDLOG_MOUNT_FAIL:    stateText = "Baglama hatasi "; stateColor = COLOR_FAIL;  break;
+		case SDLOG_MOUNTED:       stateText = "Hazir          "; stateColor = COLOR_ACCENT; break;
+		default:                  stateText = "?              "; stateColor = COLOR_MUTED; break;
 		}
 
-		LCD_DisplayString(10, LINE_CONTENT, "Durum:", MENU_FCOLOR, MENU_BCOLOR, 24);
-		LCD_DisplayString(130, LINE_CONTENT, stateText, LCD_COLOR_RED, MENU_BCOLOR, 16);
+		LCD_DisplayString(20, LINE_CONTENT, "Durum", COLOR_TEXT, COLOR_BG, 16);
+		LCD_DisplayString(100, LINE_CONTENT, stateText, stateColor, COLOR_BG, 16);
 
 		if (state == SDLOG_MOUNTED)
 		{
-			snprintf(buf, sizeof(buf), "Bos: %lu KB", (unsigned long)SdLog_GetFreeKB());
-			LCD_DisplayString(10, LINE_CONTENT + 30, buf, MENU_FCOLOR, MENU_BCOLOR, 16);
+			snprintf(buf, sizeof(buf), "Bos alan: %lu KB", (unsigned long)SdLog_GetFreeKB());
+			LCD_DisplayString(20, LINE_CONTENT + 26U, buf, COLOR_MUTED, COLOR_BG, 16);
 
-			snprintf(buf, sizeof(buf), "Kayit sayisi: %lu", (unsigned long)SdLog_GetWriteCount());
-			LCD_DisplayString(10, LINE_CONTENT + 50, buf, MENU_FCOLOR, MENU_BCOLOR, 16);
+			snprintf(buf, sizeof(buf), "Kayit: %lu", (unsigned long)SdLog_GetWriteCount());
+			LCD_DisplayString(20, LINE_CONTENT + 46U, buf, COLOR_MUTED, COLOR_BG, 16);
 		}
 		else if (state == SDLOG_NO_FILESYSTEM)
 		{
-			LCD_DisplayString(10, LINE_CONTENT + 30, "K2'ye 2 kez bas:", MENU_FCOLOR, MENU_BCOLOR, 16);
-			LCD_DisplayString(10, LINE_CONTENT + 50, "Bicimlendir (SILER!)", MENU_FCOLOR, MENU_BCOLOR, 16);
+			LCD_DisplayString(20, LINE_CONTENT + 26U, "K2'ye 2 kez bas:", COLOR_TEXT, COLOR_BG, 16);
+			LCD_DisplayString(20, LINE_CONTENT + 46U, "bicimlendirir (siler)", COLOR_MUTED, COLOR_BG, 16);
+		}
+	}
+	else if (index == 4U)
+	{
+		char buf[24];
+
+		LCD_DisplayString(20, LINE_CONTENT + 26U, "Sonuc", COLOR_TEXT, COLOR_BG, 16);
+		DrawResult(LINE_CONTENT + 46U, s_flashResult);
+
+		if (s_flashResult != TEST_NONE)
+		{
+			snprintf(buf, sizeof(buf), "JEDEC ID: 0x%06lX", (unsigned long)s_flashId);
+			LCD_DisplayString(20, LINE_CONTENT + 66U, buf, COLOR_MUTED, COLOR_BG, 16);
 		}
 	}
 }

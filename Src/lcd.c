@@ -17,6 +17,7 @@
 #include "apm32e10x_gpio.h"
 #include "apm32e10x_rcm.h"
 #include "apm32e10x_spi.h"
+#include "apm32e10x_dma.h"
 
 /* Backlight (PA8) is owned by backlight.c (TIM1_CH1 PWM, pot-controlled) -
  * not driven here. */
@@ -141,17 +142,44 @@ static uint32_t LCD_CalPow(uint8_t m, uint8_t n)
 #define LCD_X_OFFSET 0U
 #define LCD_Y_OFFSET 20U
 
+/* Portrait (default) MADCTL: MY|MX - tuned/verified against real hardware
+ * earlier (180 deg flip to match physical mounting). Landscape adds MV (row/
+ * column exchange) on top - rotates the same physical glass 90 deg. Because
+ * MV swaps which register is "row" vs "column", the 20px GRAM crop that
+ * normally sits on RASET has to move to CASET whenever MV is active - see
+ * LCD_AddressSet(). If the picture comes out mirrored/upside-down in
+ * landscape, try MADCTL 0x60 (MX|MV) instead of 0xA0 (MY|MV) below; either
+ * way the offset-swap logic here is unaffected since both carry MV. */
+#define LCD_MADCTL_PORTRAIT  0xC0U
+#define LCD_MADCTL_LANDSCAPE 0xA0U
+
+static uint8_t s_landscape = 0U;
+
 static void LCD_AddressSet(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
 {
+	uint16_t xOffset = s_landscape ? LCD_Y_OFFSET : LCD_X_OFFSET;
+	uint16_t yOffset = s_landscape ? LCD_X_OFFSET : LCD_Y_OFFSET;
+
 	LCD_WriteReg(0x2A);
-	LCD_WriteHalfword((uint16_t)(x1 + LCD_X_OFFSET));
-	LCD_WriteHalfword((uint16_t)(x2 + LCD_X_OFFSET));
+	LCD_WriteHalfword((uint16_t)(x1 + xOffset));
+	LCD_WriteHalfword((uint16_t)(x2 + xOffset));
 
 	LCD_WriteReg(0x2B);
-	LCD_WriteHalfword((uint16_t)(y1 + LCD_Y_OFFSET));
-	LCD_WriteHalfword((uint16_t)(y2 + LCD_Y_OFFSET));
+	LCD_WriteHalfword((uint16_t)(y1 + yOffset));
+	LCD_WriteHalfword((uint16_t)(y2 + yOffset));
 
 	LCD_WriteReg(0x2C);
+}
+
+/* Switches between portrait (menu/text - default) and landscape (video) -
+ * call LCD_SetOrientation(1) before drawing in landscape and (0) to restore
+ * portrait for the menu afterward. */
+void LCD_SetOrientation(uint8_t landscape)
+{
+	s_landscape = landscape ? 1U : 0U;
+
+	LCD_WriteReg(0x36);
+	LCD_WriteData(s_landscape ? LCD_MADCTL_LANDSCAPE : LCD_MADCTL_PORTRAIT);
 }
 
 void LCD_DrawPoint(uint16_t x, uint16_t y, uint16_t color)
@@ -170,6 +198,86 @@ void LCD_Clear(uint16_t xStart, uint16_t yStart, uint16_t xEnd, uint16_t yEnd, u
 	{
 		LCD_WriteHalfword(color);
 	}
+}
+
+/* Bulk-pixel path for animation/video. Two prior attempts and why they
+ * weren't enough (measured on hardware, 134KB native-res frame):
+ *   1) LCD_WriteData toggles CS around every byte - fine for text, 352ms/frame.
+ *   2) A "fast" byte writer that only waits TXBE (not BSY) before the next
+ *      byte, still CPU-polled one byte at a time - 244ms/frame.
+ * Both are CPU-bound on the TXBE/BSY polling loop, nowhere near the SPI
+ * clock's actual bit-time budget (~30ms theoretical for 134KB at 36MHz).
+ * This version hands the whole burst to DMA1 Channel3 (SPI1_TX) with the
+ * SPI temporarily switched to 16-bit frames, so the peripheral clocks
+ * pixels out back-to-back with no per-byte CPU involvement at all. */
+#define LCD_DMA_CHANNEL   DMA1_Channel3
+#define LCD_DMA_FLAG_TC   DMA1_FLAG_TC3
+
+void LCD_BlitBegin(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2)
+{
+	LCD_AddressSet(x1, y1, x2, y2);
+
+	RCM_EnableAHBPeriphClock(RCM_AHB_PERIPH_DMA1);
+
+	SPI_Disable(LCD_SPI_BUS);
+	SPI_ConfigDataSize(LCD_SPI_BUS, SPI_DATA_LENGTH_16B);
+	SPI_Enable(LCD_SPI_BUS);
+
+	LCD_CS_CLR();
+}
+
+void LCD_BlitPixels(const uint16_t *pixels, uint32_t count)
+{
+	DMA_Config_T dmaConfig;
+	uint32_t timeout = 0;
+
+	DMA_Disable(LCD_DMA_CHANNEL);
+	DMA_ClearStatusFlag(LCD_DMA_FLAG_TC);
+
+	dmaConfig.peripheralBaseAddr = (uint32_t)&LCD_SPI_BUS->DATA;
+	dmaConfig.memoryBaseAddr = (uint32_t)pixels;
+	dmaConfig.dir = DMA_DIR_PERIPHERAL_DST;
+	dmaConfig.bufferSize = count;
+	dmaConfig.peripheralInc = DMA_PERIPHERAL_INC_DISABLE;
+	dmaConfig.memoryInc = DMA_MEMORY_INC_ENABLE;
+	dmaConfig.peripheralDataSize = DMA_PERIPHERAL_DATA_SIZE_HALFWORD;
+	dmaConfig.memoryDataSize = DMA_MEMORY_DATA_SIZE_HALFWORD;
+	dmaConfig.loopMode = DMA_MODE_NORMAL;
+	dmaConfig.priority = DMA_PRIORITY_HIGH;
+	dmaConfig.M2M = DMA_M2MEN_DISABLE;
+	DMA_Config(LCD_DMA_CHANNEL, &dmaConfig);
+
+	SPI_I2S_EnableDMA(LCD_SPI_BUS, SPI_I2S_DMA_REQ_TX);
+	DMA_Enable(LCD_DMA_CHANNEL);
+
+	while (DMA_ReadStatusFlag(LCD_DMA_FLAG_TC) == RESET)
+	{
+		if (++timeout >= 2000000U)
+		{
+			break;
+		}
+	}
+
+	SPI_I2S_DisableDMA(LCD_SPI_BUS, SPI_I2S_DMA_REQ_TX);
+}
+
+void LCD_BlitEnd(void)
+{
+	uint32_t timeout = 0;
+
+	while (SPI_I2S_ReadStatusFlag(LCD_SPI_BUS, SPI_FLAG_BSY) == SET)
+	{
+		if (++timeout >= 20000U)
+		{
+			break;
+		}
+	}
+
+	SPI_Disable(LCD_SPI_BUS);
+	SPI_ConfigDataSize(LCD_SPI_BUS, SPI_DATA_LENGTH_8B);
+	SPI_Enable(LCD_SPI_BUS);
+
+	LCD_CS_SET();
 }
 
 void LCD_DrawLine(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t color)
@@ -343,8 +451,8 @@ void LCD_Init(void)
 	LCD_WriteReg(0x3A); /* Pixel format */
 	LCD_WriteData(0x55); /* 16 bpp */
 
-	LCD_WriteReg(0x36); /* MADCTL: MY|MX set -> 180 deg rotation */
-	LCD_WriteData(0xC0);
+	LCD_WriteReg(0x36); /* MADCTL: MY|MX set -> 180 deg rotation (portrait default) */
+	LCD_WriteData(LCD_MADCTL_PORTRAIT);
 
 	LCD_WriteReg(0xB2); /* Porch control */
 	LCD_WriteData(0x0C);

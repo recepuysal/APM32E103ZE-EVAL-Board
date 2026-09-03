@@ -62,12 +62,16 @@ zaten test edilmiş. Sıfırdan saat konfigürasyonu yazılmadı.
       SPI_LCD demosundaki menü mantığının (KEY1: seç, KEY2: gir, KEY3: geri)
       portu. Buton pinleri Board_APM32E103_EVAL.h'den doğrulandı:
       `KEY1=PF9` (aktif-düşük, pull-up), `KEY2=PC13` (aktif-düşük, pull-up),
-      `KEY3=PA0` (aktif-yüksek, pull-down). 3 madde: LED Durumu (canlı
-      LED1/2/3 okuma), Sayac (canlı ms tick), Kart Bilgisi (statik metin).
+      `KEY3=PA0` (aktif-yüksek, pull-down).
       SDK'nın TMR7-kesmesi + blocking-delay yöntemi yerine, UniBoard'daki
       power-button ile aynı non-blocking tick-tabanlı debounce kullanıldı.
-      Menü başlıkları (üst çubuk) ekranda ortalanıyor.
+      5 madde: LED Durumu, Sayac, Kart Bilgisi, SD Kart, SPI Flash.
       **Donanımda test edildi (2026-09-01), çalışıyor.**
+      - **Görsel tasarım (2026-09-02 güncellendi):** tek vurgu rengi (koyu
+        camgöbeği) hem marka hem "iyi/nötr" durum anlamına geliyor, kırmızı
+        sadece hatalar için ayrılmış. Seçili madde artık sadece metin rengi
+        değil, tam genişlikte dolu bir şerit ile vurgulanıyor. Numaralandırma
+        ve ayırıcı çizgi kaldırıldı — sadelik için gereksizdi.
 - [x] **İşlemci sıcaklığı** (`Src/temp.c`/`Inc/temp.h`) — ADC1 kanal 16
       (dahili sıcaklık sensörü) üzerinden okunuyor, "Kart Bilgisi" menü
       sayfasında canlı gösteriliyor.
@@ -134,6 +138,55 @@ zaten test edilmiş. Sıfırdan saat konfigürasyonu yazılmadı.
         `f_mount` başarılı, seri log ile SD karttaki `LOG.TXT`'e yazılan kayıt
         sayısı ve menüdeki "SD Kart" sayfasındaki canlı sayaç birebir eşleşti
         (7 kayıt).
+- [x] **SPI NOR Flash** (`Src/spiflash.c`/`Inc/spiflash.h`) — W25Q16 (2MB),
+      Geehy'nin `bsp_w25q16.c`'sinden portlandı, sadece kullanılan
+      fonksiyonlarla (JEDEC ID, sektör silme, sayfa yazma, okuma) sadeleştirildi.
+      SPI3 pinleri (`CS=PA15 SCK=PB3 MISO=PB4 MOSI=PB5`) JTAG ile çakışıyor
+      (TDI/TDO/TRST) — `GPIO_ConfigPinRemap(GPIO_REMAP_SWJ_JTAGDISABLE)` ile
+      JTAG kapatılıp SWD (ST-Link ile flaşlama) açık bırakıldı. Menüdeki
+      "SPI Flash" sayfasında KEY2 ile JEDEC ID okuma + yaz/oku doğrulama testi
+      çalışıyor. **Donanımda test edildi (2026-09-02), çalışıyor.**
+- [x] **Demo (sekip duran logo)** (`Src/demo.c`/`Inc/demo.h`) — "DVD ekran
+      koruyucusu" tarzı, her duvara çarpışta renk değiştiren, içinde "APM32"
+      yazan bir kutu. LCD sürücüsünün gerçek zamanlı yeniden çizim hızını
+      gösteren küçük bir vitrin.
+- [x] **Video oynatma** (`Src/video.c`/`Inc/video.h` + `Inc/video_data.h`) —
+      kullanıcının kendi mp4'ünden (Tom & Jerry çizgi filmi, t=190-265sn
+      arası, kredi ekranından hemen önceki kesintisiz bölüm) **75 saniyelik,
+      tam ekran (240x280), native çözünürlükte, 8 fps** döngüsel oynatım.
+      Host tarafında Python + imageio/ffmpeg ile "cover" kırpma (640x360
+      kaynaktan kenarlardan kırpılıp tam ekranı dolduracak şekilde) yapılıp
+      RGB565'e çevriliyor.
+      - **Depolama:** ilk denemede kareler MCU flash'ına C dizisi olarak
+        gömülüyordu (512KB'lık flash'ta ancak birkaç saniyeye yer vardı).
+        Kareler artık **microSD karta** (`0:VIDEO.BIN`, ~77MB, host'tan
+        `extract_native.py` scripti ile doğrudan karta yazılıyor) konup
+        FatFs ile akış halinde okunuyor — kart 508MB olsa bile dakikalarca
+        native video için fazlasıyla yeterli, flash sadece ~85KB kullanıyor.
+      - **Performans serüveni** (hepsi donanımda ölçüldü, `lcd.c`):
+        1) Metin/menü yolundaki `LCD_WriteData` her byte için CS pinini
+           ayrı aç/kapatıyor → tam kare (134KB) için **352ms**.
+        2) Sadece TXBE (BSY değil) bekleyen "hızlı" byte yazımı → **244ms**
+           (hâlâ CPU'nun byte-byte pollediği, boru hattı kurulmamış bir yol).
+        3) **DMA1 Kanal3 + SPI'nin geçici olarak 16-bit çerçeve moduna
+           alınması** (`LCD_BlitBegin/Pixels/End`) — CPU'yu döngüden tamamen
+           çıkarıp donanımın kendi hızında akıtmasını sağlıyor → **~28ms**
+           (teorik SPI limitine çok yakın). Menüdeki metin çizimi hâlâ eski
+           (yavaş ama basit) yolu kullanıyor, sadece video/demo blit yolu
+           DMA'ya taşındı — regresyon riski yok.
+      - **Sonuç:** kare başına ~46ms SD okuma + ~28ms DMA blit = ~75ms
+        toplam (~13fps kapasite), 8fps'de akıcı ve tutarlı oynatılıyor.
+      - **Donanımda test edildi (2026-09-03), akıcı çalışıyor.**
+
+### Denenip geri alınanlar
+
+- **I2C EEPROM (AT24C02)** ve **harici SDRAM (DMC)** eklenip test edildi,
+  ikisi de donanımda çalışmadı (EEPROM testi "Başarısız" dönüyordu, SDRAM
+  testi kartı kilitliyordu) — kullanıcı isteğiyle firmware'den tamamen
+  çıkarıldı (2026-09-02). Not: SDRAM ile SD kart (SDIO) tam olarak aynı 3
+  MCU pinini paylaşıyor (`PC10/PC11/PD2` — DMC'nin DQ8/DQ9/DQ10'u, SDIO'nun
+  D2/D3/CMD'siyle aynı iz), şemadan doğrulandı — ikisi asla aynı anda aktif
+  olamaz, ileride SDRAM'e dönülürse bu unutulmamalı.
 
 ## Yapılacak / Bilinmeyenler
 
@@ -141,8 +194,8 @@ zaten test edilmiş. Sıfırdan saat konfigürasyonu yazılmadı.
       şu an sabit.
 - [ ] CAN1/CAN2 (TJA1050 transceiver'lar) henüz kullanılmadı.
 - [ ] Native USB Device (OTG FS, PA11/PA12) henüz kullanılmadı.
-- [ ] SPI NOR Flash (W25Q16, 2MB) ve I2C EEPROM (AT24C02) henüz kullanılmadı.
-- [ ] 16MB harici SDRAM (DMC/FSMC arabirimi) henüz kullanılmadı.
+- [ ] I2C EEPROM (AT24C02) ve harici SDRAM (DMC) — bkz. "Denenip geri
+      alınanlar", ileride tekrar denenebilir ama kök neden bulunmadan değil.
 
 ## Dökümanlar
 
