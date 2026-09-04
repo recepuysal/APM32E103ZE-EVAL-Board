@@ -30,6 +30,7 @@
 #include "backlight.h"
 #include "sdlog.h"
 #include "spiflash.h"
+#include "livestream.h"
 #include <stdio.h>
 
 #define LED_PORT   GPIOD
@@ -58,6 +59,7 @@ int main(void)
 	Serial_Init();
 	SdLog_Init();
 	SPIFlash_Init();
+	LiveStream_Init();
 	LCD_Init();
 	Menu_Init();
 

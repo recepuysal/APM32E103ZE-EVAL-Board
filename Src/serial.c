@@ -3,8 +3,14 @@
  * @file    serial.c
  * @brief   USART1 status log output body.
  *
- * Pins/baud match Geehy's official SPI_LCD demo COM1 config (Board_APM32E103_EVAL.h):
- * TX=PA9, RX=PA10, 115200 8N1, no hardware flow control.
+ * Pins match Geehy's official SPI_LCD demo COM1 config (Board_APM32E103_EVAL.h):
+ * TX=PA9, RX=PA10, 8N1, no hardware flow control.
+ *
+ * Baud bumped 115200 -> 921600 -> 2000000 to give livestream.c's incoming
+ * video feed real bandwidth - the MCU side has no ceiling of its own at
+ * this rate, and 2,000,000 divides 72MHz PCLK2 exactly (USARTDIV=2.25,
+ * zero baud-rate error). NOTE: any terminal watching the TEMP/LED status
+ * lines on this same port needs to match this baud rate.
  ******************************************************************************
  */
 
@@ -35,7 +41,7 @@ void Serial_Init(void)
 	gpioConfig.mode = GPIO_MODE_IN_FLOATING;
 	GPIO_Config(SERIAL_PORT, &gpioConfig);
 
-	usartConfig.baudRate = 115200;
+	usartConfig.baudRate = 2000000;
 	usartConfig.wordLength = USART_WORD_LEN_8B;
 	usartConfig.stopBits = USART_STOP_BIT_1;
 	usartConfig.parity = USART_PARITY_NONE;

@@ -26,6 +26,7 @@
 #include "spiflash.h"
 #include "demo.h"
 #include "video.h"
+#include "livestream.h"
 #include "apm32e10x_gpio.h"
 #include "apm32e10x_rcm.h"
 #include <stdio.h>
@@ -56,8 +57,8 @@
 
 #define TITLE_HEIGHT 38U
 #define ROW_Y_BASE   40U
-#define ROW_HEIGHT   26U
-#define ROW_STEP     30U
+#define ROW_HEIGHT   24U
+#define ROW_STEP     26U
 #define ROW_MARGIN   12U
 #define FOOTER_TOP   250U
 #define LINE_CONTENT 54U
@@ -77,8 +78,12 @@ static Key_T s_key1 = { KEY1_PORT, KEY1_PIN, 1U, 0U, 0U };
 static Key_T s_key2 = { KEY2_PORT, KEY2_PIN, 1U, 0U, 0U };
 static Key_T s_key3 = { KEY3_PORT, KEY3_PIN, 0U, 0U, 0U };
 
-static const char *s_itemTitle[7] = { "LED Durumu", "Sayac", "Kart Bilgisi", "SD Kart", "SPI Flash", "Demo", "Video" };
-#define MENU_ITEM_COUNT 7U
+static const char *s_itemTitle[8] =
+{
+	"LED Durumu", "Sayac", "Kart Bilgisi", "SD Kart", "SPI Flash", "Demo",
+	"Video", "Canli Yayin"
+};
+#define MENU_ITEM_COUNT 8U
 
 typedef enum
 {
@@ -145,6 +150,10 @@ void Menu_Poll(void)
 			{
 				Video_Stop();
 			}
+			else if (s_selected == 7U)
+			{
+				LiveStream_Stop();
+			}
 
 			s_state = MENU_STATE_HOME;
 			DrawHome();
@@ -161,6 +170,10 @@ void Menu_Poll(void)
 			}
 
 			Video_Step(); /* no-ops internally while paused */
+		}
+		else if (s_selected == 7U)
+		{
+			LiveStream_Step();
 		}
 		else
 		{
@@ -245,7 +258,7 @@ static void DrawItem(uint8_t index, uint8_t selected)
 	uint16_t fg = selected ? COLOR_WHITE : COLOR_TEXT;
 
 	LCD_Clear(ROW_MARGIN, top, LCD_WIDTH - ROW_MARGIN, (uint16_t)(top + ROW_HEIGHT), bg);
-	LCD_DisplayString(ROW_MARGIN + 12U, (uint16_t)(top + 1U), s_itemTitle[index], fg, bg, 24);
+	LCD_DisplayString(ROW_MARGIN + 12U, top, s_itemTitle[index], fg, bg, 24);
 }
 
 static void DrawHome(void)
@@ -299,6 +312,10 @@ static void DrawSub(uint8_t index)
 	else if (index == 6U)
 	{
 		Video_Start();
+	}
+	else if (index == 7U)
+	{
+		LiveStream_Start();
 	}
 	else
 	{

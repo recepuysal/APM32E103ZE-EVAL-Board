@@ -151,18 +151,19 @@ zaten test edilmiş. Sıfırdan saat konfigürasyonu yazılmadı.
       yazan bir kutu. LCD sürücüsünün gerçek zamanlı yeniden çizim hızını
       gösteren küçük bir vitrin.
 - [x] **Video oynatma** (`Src/video.c`/`Inc/video.h` + `Inc/video_data.h`) —
-      kullanıcının kendi mp4'ünden (Tom & Jerry çizgi filmi, t=190-265sn
-      arası, kredi ekranından hemen önceki kesintisiz bölüm) **75 saniyelik,
-      tam ekran (240x280), native çözünürlükte, 8 fps** döngüsel oynatım.
-      Host tarafında Python + imageio/ffmpeg ile "cover" kırpma (640x360
-      kaynaktan kenarlardan kırpılıp tam ekranı dolduracak şekilde) yapılıp
-      RGB565'e çevriliyor.
+      kullanıcının kendi mp4'ünden (Avatar: The Last Airbender, "Aang vs.
+      Ozai" final sahnesi, **tam uzunluk, ~812 saniye**), **yatay (280x240,
+      native çözünürlük), 12 fps** döngüsel oynatım, durdur/duraklat
+      kontrolleriyle (KEY2=duraklat/devam, KEY3=durdur+geri). Host tarafında
+      Python + imageio/ffmpeg ile "cover" kırpma yapılıp RGB565'e çevriliyor.
       - **Depolama:** ilk denemede kareler MCU flash'ına C dizisi olarak
         gömülüyordu (512KB'lık flash'ta ancak birkaç saniyeye yer vardı).
-        Kareler artık **microSD karta** (`0:VIDEO.BIN`, ~77MB, host'tan
+        Kareler artık **microSD karta** (`0:VIDEO.BIN`, host'tan
         `extract_native.py` scripti ile doğrudan karta yazılıyor) konup
-        FatFs ile akış halinde okunuyor — kart 508MB olsa bile dakikalarca
-        native video için fazlasıyla yeterli, flash sadece ~85KB kullanıyor.
+        FatFs ile akış halinde okunuyor, flash sadece ~85KB kullanıyor.
+      - **Yatay döndürme:** `LCD_SetOrientation()` (ST7789 MADCTL'nin MV
+        bitiyle) ile aynı fiziksel panel, video sayfasında 90° döndürülüp
+        menüye dönünce dikeye geri alınıyor (`lcd.c`).
       - **Performans serüveni** (hepsi donanımda ölçüldü, `lcd.c`):
         1) Metin/menü yolundaki `LCD_WriteData` her byte için CS pinini
            ayrı aç/kapatıyor → tam kare (134KB) için **352ms**.
@@ -172,11 +173,54 @@ zaten test edilmiş. Sıfırdan saat konfigürasyonu yazılmadı.
            alınması** (`LCD_BlitBegin/Pixels/End`) — CPU'yu döngüden tamamen
            çıkarıp donanımın kendi hızında akıtmasını sağlıyor → **~28ms**
            (teorik SPI limitine çok yakın). Menüdeki metin çizimi hâlâ eski
-           (yavaş ama basit) yolu kullanıyor, sadece video/demo blit yolu
-           DMA'ya taşındı — regresyon riski yok.
-      - **Sonuç:** kare başına ~46ms SD okuma + ~28ms DMA blit = ~75ms
-        toplam (~13fps kapasite), 8fps'de akıcı ve tutarlı oynatılıyor.
+           (yavaş ama basit) yolu kullanıyor, sadece video/demo/canlı yayın
+           blit yolu DMA'ya taşındı — regresyon riski yok.
+      - **SD kart notu:** kullanılan 32GB etiketli kart aslında sahte
+        (gerçek kapasitesi ~500MB) çıktı — yazma sırasında 3 kare noktasında
+        (baş/orta/son) MD5 checksum ile yaz-sonra-oku doğrulaması yapılarak
+        sessiz veri bozulması olmadığı teyit edildi.
       - **Donanımda test edildi (2026-09-03), akıcı çalışıyor.**
+- [x] **Canlı Yayın** (`Src/livestream.c`/`Inc/livestream.h` +
+      `tools/livestream_send.py`) — PC ekranını (tam ekran veya seçilen bir
+      dikdörtgen, örn. bir tarayıcı penceresi) gerçek zamanlı olarak karta
+      yansıtıyor. Aynı USART1/CH340 hattı (durum logunun kullandığı port)
+      üzerinden akıyor, baud 115200 → 921600 → **2.000.000**'e çıkarıldı
+      (72MHz PCLK2'yi tam bölüyor, sıfır hata payı).
+      - **Mimari:** USART1 RX, DMA1 Kanal5 ile döngüsel bir halka tampona
+        akıyor (klasik STM32F1 eşlemesi); `LiveStream_Step()` bu tamponu
+        byte byte tarayan bir senkron-işareti + başlık ayrıştırıcısı,
+        gelen veriyi video.c'deki gibi küçük parçalar (chunk) hâlinde
+        doğrudan `LCD_BlitBegin/Pixels/End` DMA yoluna akıtıyor — tüm kareyi
+        RAM'de tutmuyor, çözünürlük RAM'le sınırlı değil.
+      - **Kalite kararı:** çözünürlük panelin native yatay boyutuyla birebir
+        (**280x240, büyütme/küçültme yok**) — bant genişliği kısıtı bu
+        yüzden çözünürlükten değil, kare hızından kısılıyor.
+      - **Gerçek darboğaz:** SD kart üzerinden okunan video (SDIO, saniyede
+        birkaç MB) ile kıyaslanınca USART/CH340 hattı 10-30 kat daha yavaş
+        (ölçülen gerçek verim ~150KB/s, nominal 2Mbaud'un altında — CH340'ın
+        USB paket yükü nedeniyle). Bu yüzden tam kare native çözünürlükte
+        ~1-1.5fps'e sıkışıyor.
+      - **Delta (fark) kodlama:** bu darboğazı aşmak için PC tarafı her
+        yakalamayı bir önceki kareyle karşılaştırıp **sadece değişen
+        piksellerin sınırlayıcı dikdörtgenini** gönderiyor — masaüstü/metin
+        gibi çoğunlukla durağan içerikte kare hızı belirgin artıyor, tam
+        hareketli video gibi içerikte otomatik olarak tam kareye geri
+        düşüyor. Bozulmaya karşı her 30 güncellemede bir zorunlu tam kare
+        (self-healing keyframe) gönderiliyor. Tel protokolü:
+        `sync(4B) + x1,y1,w,h(uint16 LE) + w*h*2 byte RGB565`.
+      - **Bulunan/Düzeltilen sorunlar:**
+        1) İlk sürümde her çıktı satırı ayrı `LCD_BlitPixels` çağrısıyla
+           (240 çağrı/kare) gönderiliyordu — DMA kurulum yükü 240 kat
+           tekrarlanınca blit süresi ciddi uzuyor, bu da 4KB'lık halka
+           tamponunu her karede taşırıp donma/bozulmaya yol açıyordu. Çözüm:
+           video.c'deki gibi büyük parça (4KB) bazlı akış mimarisine geçildi.
+        2) PC tarafında piksel byte sırası yanlıştı (`>u2` büyük-uç yazılmıştı,
+           MCU küçük-uç `uint16_t*` olarak okuyor) — renkler karışık
+           görünüyordu. `extract_native.py`'nin (video.c'nin çalışan
+           kaynağı) kullandığı doğal (küçük-uç) sıraya (`<u2`) çevrilerek
+           düzeltildi.
+      - **Donanımda test edildi (2026-09-04), delta kodlamayla akıcı ve
+        renkleri doğru çalışıyor.**
 
 ### Denenip geri alınanlar
 
